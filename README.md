@@ -14,31 +14,106 @@ No PwnDoc credentials are stored.
 
 ## Quick start
 
-Requirements: Python 3.10+, Docker with the compose plugin (for PwnDoc), an API key for any
-OpenAI-compatible LLM.
+> ### ⚠ Change the default password
+> `start_all.sh` creates the PwnDoc administrator **`admin` / `Admin@12345`**. This default is public
+> (it is in this repository), so treat it as a placeholder:
+>
+> - **Best:** choose your own before the first run:
+>   `PWNDOC_ADMIN_USER=alice PWNDOC_ADMIN_PASSWORD='Str0ng-Passw0rd' ./start_all.sh`
+>   (at least 8 characters with an upper-case letter, a lower-case letter and a digit).
+> - **Or:** log in once and change it in PwnDoc (user menu, top right > **Profile** > new password).
+>   Do this before giving the address to anyone, and never leave the default on a network you do not
+>   fully trust.
+>
+> The script can only set the password on a **fresh** PwnDoc database. If PwnDoc already has users it
+> leaves them alone, checks whether the configured login works, and warns if it does not.
 
-### One command
+### Requirements
+
+| What | Why |
+|---|---|
+| Linux or macOS host with `bash`, `git`, `curl`, `python3` (3.10+) | run the scripts and the gateway |
+| Docker Engine with the **compose plugin** (`docker compose version`) and a running daemon | runs PwnDoc and MongoDB |
+| Internet access on first run | clone PwnDoc, pull its images, `pip install` |
+| An API key for an OpenAI-compatible LLM (or a local Ollama) | needed only when you use **Update with AI** |
+
+### Install and run
 
 ```bash
-./start_all.sh            # also: ./start_all.sh status | stop
+# 1. Get the code
+git clone https://github.com/Mahesh-nrg/Report_auto.git
+cd Report_auto
+
+# 2. (Recommended) pick your own admin password, then start everything
+export PWNDOC_ADMIN_PASSWORD='Str0ng-Passw0rd'     # skip to use the default Admin@12345
+./start_all.sh
 ```
 
-It clones and starts upstream PwnDoc (bound to `127.0.0.1`), creates the administrator on a fresh
-install, installs and starts the gateway over HTTPS, and prints the **port to open**, the
-**address** and the **login** to hand to users. The default login is `admin` / `Admin@12345`
-(a shared default: change it in PwnDoc > Profile after the first sign-in). The script can only set
-the password on a fresh PwnDoc; if users already exist it verifies the login and warns instead.
+The first run takes a few minutes (image download). The script then:
+
+1. checks the prerequisites above;
+2. clones upstream PwnDoc (pinned release) and starts it with Docker, listening on `127.0.0.1` only;
+3. waits until PwnDoc answers and creates the administrator on a fresh install;
+4. creates `.venv`, installs the gateway and starts it on `0.0.0.0` over HTTPS;
+5. prints a summary with the **port to open**, the **address** and the **login**, for example:
+
+```text
+ 1) PORT TO OPEN (firewall / security group), TCP, inbound from your LAN:
+      8080/tcp   AI gateway + PwnDoc UI   <- the only port users need
+ 2) ADDRESS TO GIVE USERS:   https://<this-machine-ip>:8080
+ 3) LOGIN TO GIVE USERS:     Username: admin    Password: <your password>
+```
+
+Open only the **gateway port** to your LAN (default `8080`; the script picks the next free port and
+tells you if it is busy). PwnDoc's own port (`8443`) stays on `127.0.0.1`, so do not open it.
+Example with ufw: `sudo ufw allow from 192.168.1.0/24 to any port 8080 proto tcp`.
+
+### First-time setup in the browser
+
+1. Open the printed address. The certificate is self-signed, so the browser warns once: choose
+   **Advanced > Continue**.
+2. Log in with the printed username and password, then **change the password** if you kept the
+   default (see the warning above).
+3. As an administrator, click the purple **⚙ AI Settings** button, enter the LLM **base URL**, **API
+   key** and **model**, and press **Test connection**, then **Save**.
+4. Open any audit and click **✨ Update with AI**. Other PwnDoc users log in with their own accounts
+   (an administrator creates them in PwnDoc's user management).
+
+### Day-to-day commands
+
+```bash
+./start_all.sh              # start (or re-run safely; it never recreates existing data)
+./start_all.sh status       # gateway process and PwnDoc containers
+./start_all.sh stop         # stop gateway and PwnDoc; all data is kept
+./start_all.sh --help       # every option
+tail -f logs/gateway.log    # gateway log
+```
+
+Report data lives in the PwnDoc Docker volumes; gateway settings, backups and the RAG index live in
+`./data` (see [Configuration](#configuration)). `stop` removes neither. To update, run
+`git pull && ./start_all.sh`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PWNDOC_ADMIN_USER` / `PWNDOC_ADMIN_PASSWORD` | `admin` / `Admin@12345` | First-run administrator (needs upper, lower, digit, 8+ chars) |
+| `PWNDOC_ADMIN_USER` / `PWNDOC_ADMIN_PASSWORD` | `admin` / `Admin@12345` | First-run administrator (upper, lower, digit, 8+ chars) |
 | `GATEWAY_PORT` | `8080` (next free port if busy) | The one port users need; open it in your firewall |
 | `PWNDOC_PORT` | `8443` (next free port if busy) | PwnDoc's own port, kept on `127.0.0.1` |
 | `GATEWAY_MODE` | `https` | `http` serves plain HTTP (trusted networks only) |
 | `PWNDOC_PUBLIC` | `0` | `1` publishes PwnDoc's port on all interfaces too |
-| `WITH_RAG` | `0` | `1` installs the local-documents extra |
+| `WITH_RAG` | `0` | `1` installs the local-documents extra (large download) |
 
-### Step by step
+### Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `port 8080 is busy, using 8081` | Normal. Open the port shown in the summary, or set `GATEWAY_PORT` |
+| `docker: command not found` / daemon not running | Install Docker and start it (`sudo systemctl start docker`) |
+| Image pull fails with `docker-credential-desktop not found` | Handled automatically with an anonymous Docker config |
+| Warning that the admin login does not work | PwnDoc already had users: use the password you set earlier, or reset it in PwnDoc |
+| Browser says the connection is not private | Expected with the self-signed certificate; continue once |
+| Need to see what went wrong | `tail -n 100 logs/gateway.log` and `docker compose -p pwndoc logs` in `./pwndoc` |
+
+### Manual install (without `start_all.sh`)
 
 ```bash
 # 1. Fetch and start upstream PwnDoc (clones a pinned release into ./pwndoc, prebuilt images)
@@ -50,11 +125,8 @@ pip install -e '.[rag,https]'        # extras are optional, see below
 pwndoc-ai serve --host 0.0.0.0 --port 8080 --https
 ```
 
-3. Open `https://<this-machine-ip>:8080` (accept the self-signed certificate warning) and log in
-   with your normal PwnDoc credentials.
-4. A PwnDoc administrator opens **⚙ AI Settings**, enters the LLM base URL, API key and model, and
-   uses **Test connection**.
-5. Open any audit and click **✨ Update with AI**.
+Then open `https://<this-machine-ip>:8080`. On a brand-new PwnDoc, its first-run page asks you to
+create the administrator yourself.
 
 `serve` refuses to listen on a non-loopback address over plain HTTP unless you pass
 `--insecure-http` (or set `PWNDOC_AI_ALLOW_HTTP=1`), because logins and the API key would then
