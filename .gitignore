@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Runtime state (settings with API key, RAG index, backups, uploads, TLS certs)
+data/
+chroma/
+chroma_db/
+backups/
+*.pem
+*.key
+
+# Findings exports, polished outputs and token reports
+findings*.json
+*polished*.json
+tokens_used_*.json
+
+# Private/licensed study material used for RAG (never commit)
+Study_Docs/
+*.pdf
+
+# Local clone of upstream PwnDoc (created by scripts/setup_pwndoc.sh)
+pwndoc/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Runtime state written by start_all.sh
+.run/
+logs/

@@ -1,0 +1,35 @@
+# AI gateway only. Run the upstream PwnDoc separately (see scripts/setup_pwndoc.sh).
+#
+# Point PWNDOC_URL (in .env) at your PwnDoc front end. Inside a container "localhost" is the
+# container itself, so use one of:
+#   * PwnDoc running on this Docker host:   https://host.docker.internal:8443
+#   * PwnDoc on another machine:            https://<pwndoc-host>:8443
+# The stock PwnDoc certificate is self-signed, so also set PWNDOC_VERIFY_TLS=false (see .env.example).
+#
+# The gateway serves plain HTTP by default, which only suits a trusted network. To serve HTTPS
+# (build with EXTRAS=https) replace the command:
+#   command: ["pwndoc-ai", "serve", "--host", "0.0.0.0", "--port", "8080", "--https"]
+services:
+  gateway:
+    build:
+      context: .
+      args:
+        EXTRAS: ${EXTRAS:-}   # e.g. EXTRAS=rag,https
+    container_name: pwndoc-ai-gateway
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PWNDOC_URL: ${PWNDOC_URL:-https://host.docker.internal:8443}
+      PWNDOC_AI_DATA_DIR: /app/data
+      # The Dockerfile's default command binds 0.0.0.0 over HTTP; acknowledge that explicitly.
+      PWNDOC_AI_ALLOW_HTTP: ${PWNDOC_AI_ALLOW_HTTP:-1}
+    ports:
+      - "8080:8080"
+    volumes:
+      - gateway-data:/app/data   # named volume keeps the image's ownership (uid 10001)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  gateway-data:
