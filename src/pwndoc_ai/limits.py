@@ -3,7 +3,9 @@
 FastAPI parses request bodies before it resolves dependencies, so without a guard an
 unauthenticated caller could make the gateway spool arbitrarily large uploads to disk or memory
 before being answered 401. These guards run first and reject oversized bodies early (by
-``Content-Length``) or while streaming (chunked bodies).
+``Content-Length``) or while streaming (chunked bodies). The default limit is small; the upload
+route's much larger one belongs to :class:`pwndoc_ai.upload_stream.UploadBodyLimit`, which
+derives it from the upload file cap (there is no second number to keep in step).
 """
 
 from __future__ import annotations
@@ -21,16 +23,13 @@ App = Callable[[Scope, Receive, Send], Awaitable[None]]
 API_PREFIX = "/__ai/"
 DEFAULT_LIMIT = 1024 * 1024  # 1 MiB: settings, job requests
 UPLOAD_PATH = "/__ai/api/rag/documents"
-UPLOAD_LIMIT = 21 * 1024 * 1024  # the 20 MB file cap plus multipart framing
 API_HEADERS = ((b"x-content-type-options", b"nosniff"), (b"referrer-policy", b"same-origin"))
+NO_STORE_PREFIX = "/__ai/api/docx"  # client reports and their text: never kept by a cache
+NO_STORE_HEADERS = ((b"cache-control", b"no-store"), (b"pragma", b"no-cache"))
 
 
 class BodyTooLarge(Exception):  # noqa: N818 - control-flow signal, not an error type
     pass
-
-
-def limit_for(method: str, path: str) -> int:
-    return UPLOAD_LIMIT if method == "POST" and path == UPLOAD_PATH else DEFAULT_LIMIT
 
 
 async def _reject(send: Send, limit: int) -> None:
@@ -51,11 +50,15 @@ class BodyLimitMiddleware:
     def __init__(self, app: App):
         self.app = app
 
+    def limit_for(self, scope: Scope) -> int:
+        """The largest body of this request; subclasses may allow some routes more."""
+        return DEFAULT_LIMIT
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or not scope["path"].startswith(API_PREFIX):
             await self.app(scope, receive, send)
             return
-        limit = limit_for(scope["method"], scope["path"])
+        limit = self.limit_for(scope)
         declared = dict(scope["headers"]).get(b"content-length", b"")
         if declared.isdigit() and int(declared) > limit:
             await _reject(send, limit)
@@ -99,10 +102,15 @@ class ApiHeadersMiddleware:
             await self.app(scope, receive, send)
             return
 
+        no_store = scope["path"] == NO_STORE_PREFIX or scope["path"].startswith(
+            NO_STORE_PREFIX + "/"
+        )
+
         async def with_headers(message: Message) -> None:
             if message["type"] == "http.response.start":
                 present = {name.lower() for name, _ in message.get("headers", [])}
-                extra = [(n, v) for n, v in API_HEADERS if n not in present]
+                wanted = (*API_HEADERS, *NO_STORE_HEADERS) if no_store else API_HEADERS
+                extra = [(n, v) for n, v in wanted if n not in present]
                 message = {**message, "headers": [*message.get("headers", []), *extra]}
             await send(message)
 

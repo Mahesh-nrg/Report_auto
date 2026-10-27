@@ -46,3 +46,6 @@ pwndoc/
 # Runtime state written by start_all.sh
 .run/
 logs/
+
+# local Ollama install + models (large, machine-specific)
+.ollama/

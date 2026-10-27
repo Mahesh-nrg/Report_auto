@@ -16,9 +16,17 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from .config import ConfigStore, Settings, SettingsError, apply_patch, effective_verify_tls
+from .config import (
+    RESEARCH_CACHE_DIR,
+    ConfigStore,
+    Settings,
+    SettingsError,
+    apply_patch,
+    effective_verify_tls,
+)
 from .jsonio import JsonFileError, read_findings, write_json_atomic
 from .llm import LlmClient, LlmError
+from .masking import build_masker
 from .pipeline import (
     STATUS_FAILED,
     STATUS_REFINED,
@@ -58,11 +66,61 @@ def make_client(settings: Settings) -> PwnDocClient:
 
 def make_refiner(settings: Settings, data_dir: Path) -> Any:
     from .context import make_context_provider
+    from .embedder import make_embedder
+    from .onnx_embedder import OnnxEmbedder
     from .rag import DocumentIndex
     from .refiner import FindingRefiner
 
-    rag = DocumentIndex(data_dir / "rag") if settings.use_rag else None
-    return FindingRefiner(LlmClient(settings), settings, make_context_provider(settings, rag))
+    # one embedder for the local index and for ranking web results; it starts only when an
+    # embedding is needed and stops itself when idle (and with this process)
+    wanted = settings.use_rag or settings.use_web_search
+    embedder = make_embedder(data_dir, settings) if wanted else None
+    rag = None
+    if settings.use_rag:
+        path = data_dir / "rag"
+        rag = DocumentIndex(path) if embedder is None else DocumentIndex(path, embedder=embedder)
+    context = make_context_provider(
+        settings,
+        rag,
+        data_dir / RESEARCH_CACHE_DIR,
+        embedder,
+        fallback_embedder=OnnxEmbedder() if settings.use_web_search else None,
+    )
+    return FindingRefiner(LlmClient(settings), settings, context)
+
+
+def prepare_refiner(
+    refiner: Any, settings: Settings, session: ClientSession, source_audit: str | None
+) -> None:
+    """Give the CLI the same safeguards as the gateway: masking and the library wording.
+
+    With an audit as the source its client names are masked too; with a file only the pattern
+    based masking (IP addresses, e-mails, URLs) applies. Masking that is on but cannot be set up
+    stops the run: sending the text unmasked would break what the setting promises.
+    """
+    audit: dict[str, Any] = {}
+    if source_audit and (settings.mask_sensitive or settings.use_library):
+        try:
+            audit = session.get().get_audit(source_audit) or {}
+        except PwnDocError as exc:
+            if settings.mask_sensitive:
+                raise CliError(f"could not read the audit to mask client data: {exc}") from exc
+            log.warning("library wording not used: %s", exc)
+    if callable(getattr(refiner, "use_masker", None)):
+        refiner.use_masker(build_masker(audit, settings.mask_sensitive))
+    if audit and settings.use_library and callable(getattr(refiner, "use_library", None)):
+        _use_library(refiner, session, audit)
+
+
+def _use_library(refiner: Any, session: ClientSession, audit: dict[str, Any]) -> None:
+    language = audit.get("language")
+    locale = language.strip() if isinstance(language, str) and language.strip() else "en"
+    try:
+        items = session.get().list_vulnerabilities_by_locale(locale)
+    except (PwnDocError, ValueError) as exc:  # the library is optional context
+        log.warning("vulnerability library not used: %s", exc)
+        return
+    refiner.use_library([i for i in items if isinstance(i, dict)], locale)
 
 
 def make_options(fields: tuple[str, ...], mode: str) -> Any:
@@ -311,6 +369,7 @@ def cmd_refine(args: argparse.Namespace) -> int:
         mode = args.mode or ask_choice("How should fields be updated?", MODES)
         settings = resolve_settings(args, store.settings)
         refiner = make_refiner(settings, store.data_dir)
+        prepare_refiner(refiner, settings, session, source_audit)
         summary = refine_file(
             in_path, out_path, refiner, make_options(fields, mode), progress_printer
         )
@@ -352,18 +411,22 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+SECRET_LABELS = {"llm_api_key": "LLM API key", "notify_webhook_url": "webhook URL"}
+
+
 def _parse_assignment(text: str) -> tuple[str, str]:
     key, sep, value = text.partition("=")
     if not sep or not key.strip():
         raise CliError(f"--set expects key=value, got {text!r}")
     key = key.strip()
-    if key == "llm_api_key" and value == "-":
-        value = getpass.getpass("LLM API key: ")
-    elif key == "llm_api_key":
+    label = SECRET_LABELS.get(key)
+    if label and value == "-":
+        value = getpass.getpass(f"{label[0].upper()}{label[1:]}: ")
+    elif label:
         print(
-            "warning: an API key given on the command line stays in your shell history and is "
-            "visible to other local users; prefer `--set llm_api_key=-` or the LLM_API_KEY "
-            "environment variable.",
+            f"warning: a {label} given on the command line stays in your shell history and is "
+            f"visible to other local users; prefer `--set {key}=-`"
+            + (" or the LLM_API_KEY environment variable." if key == "llm_api_key" else "."),
             file=sys.stderr,
         )
     return key, value
