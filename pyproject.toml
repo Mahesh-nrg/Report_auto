@@ -23,6 +23,17 @@ dependencies = [
 [project.optional-dependencies]
 # Local document RAG (uses ChromaDB's built-in ONNX embedder, no PyTorch needed).
 rag = ["chromadb>=0.5", "pypdf>=5.1", "python-docx>=1"]
+# Refine an uploaded Word report in place (lxml is installed together with python-docx);
+# pypdf post-processes the PDF download (blank pages, table-of-contents numbers).
+docx = ["python-docx>=1", "pypdf>=5.1"]
+# PDF download of reports: blank-page removal and TOC page numbers (LibreOffice itself is a
+# system package; fonts-crosextra-carlito and fonts-crosextra-caladea keep Word's line breaks).
+pdf = ["python-docx>=1", "pypdf>=5.1"]
+# Optional second PDF -> DOCX engine of the Export tab (layout-faithful, run in an isolated worker
+# process only). LICENCE: PyMuPDF is AGPL-3.0 (or an Artifex commercial licence); installing this
+# extra makes the deployment subject to the AGPL terms. pymupdf 2.x needs Python 3.11 or newer.
+# The default "structure" engine needs only the docx extra plus mutool and pdftotext.
+pdfimport = ["pdf2docx==0.5.13", "pymupdf>=1.26.7,<2", "python-docx>=1", "pypdf>=5.1"]
 # Serve the gateway over HTTPS with an auto-generated self-signed certificate.
 https = ["cryptography>=42"]
 dev = ["pytest>=8", "pytest-cov>=5", "pytest-asyncio>=0.23", "ruff>=0.4"]

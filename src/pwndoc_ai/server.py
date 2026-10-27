@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import importlib.util
 import ipaddress
 import logging
 import os
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+import re
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -17,83 +17,82 @@ from fastapi import (
     Body,
     Depends,
     FastAPI,
-    File,
     HTTPException,
+    Query,
     Request,
-    UploadFile,
     WebSocket,
 )
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from . import __version__
+from .api_deps import (  # noqa: F401 - the dependencies are part of this module's API
+    CSRF_HEADER,
+    CSRF_VALUE,
+    SAFE_METHODS,
+    AdminDep,
+    CostlyGet,
+    GatewayDep,
+    UserDep,
+    audit_session,
+    authorise_audit,
+    check_audit_id,
+    csrf_guard,
+    pwndoc_http_error,
+)
 from .config import DEFAULT_DATA_DIR, ConfigStore, SettingsError
-from .gateway import Gateway, Identity, RefinerFactory, UpstreamError, raw_cookie  # noqa: F401 - re-exported
-from .jobs import SAFE_ID, JobConflict, JobError, JobNotFound
-from .limits import ApiHeadersMiddleware, BodyLimitMiddleware
+from .export_toolkit import pdf2docx_installed, pdf_tools_present
+from .gateway import (  # noqa: F401 - re-exported
+    Gateway,
+    Identity,
+    RefinerFactory,
+    UpstreamError,
+    docx_installed,
+    rag_installed,
+    raw_cookie,
+)
+from .jobs import SAFE_ID, JobConflict, JobError, JobNotFound, SessionExpiredError
+from .layout_service import (
+    PdfOutcome,
+    layout_headers,
+    layout_limited,
+    parse_tidy,
+    render_pdf,
+    tidy_for_download,
+)
+from .limits import ApiHeadersMiddleware
 from .llm import LlmClient, LlmError
+from .pdf import PdfBusy, PdfError, PdfUnavailable
 from .prompts import ALL_FIELDS
 from .proxy import proxy_http, proxy_websocket
-from .pwndoc_client import PwnDocError
-from .rag import SUPPORTED, safe_filename
+from .reports import FORMATS, content_disposition, export_blocker, is_docx, report_stem
+from .server_docx import router as docx_router
+from .server_export import ExportBodyLimit
+from .server_export import router as export_router
+from .server_features import router as features_router
+from .server_findings import download_headers, download_normalise
+from .server_findings import router as findings_router
+from .server_import import router as import_router
+from .server_rag import router as rag_router
 from .tls import ensure_self_signed
+from .typography_service import apply_defaults
 
 log = logging.getLogger(__name__)
 
-CSRF_HEADER = "X-Requested-With"
-CSRF_VALUE = "pwndoc-ai"
-SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
-MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 STATIC_DIR = Path(__file__).parent / "static"
 # Changing these from the UI would let any PwnDoc admin redirect every user's session cookie.
 LOCKED_SETTINGS = ("pwndoc_url", "verify_tls")
-STATIC_TYPES = {"inject.js": "text/javascript", "inject.css": "text/css"}
+# Only plain asset names: no path separators, no dots but the extension, js and css only.
+STATIC_NAME = re.compile(r"[a-z0-9_-]+\.(js|css)")
+STATIC_TYPES = {"js": "text/javascript", "css": "text/css"}
 MAX_FINDING_IDS = 500
 LOOPBACK_NAMES = frozenset({"localhost"})
 ALLOW_HTTP_ENV = "PWNDOC_AI_ALLOW_HTTP"
+NO_LLM = "no LLM is configured: an administrator must set it in AI Settings"
 
 
 class InsecureBindError(RuntimeError):
     """Refusing to serve plain HTTP on a non-loopback address without explicit consent."""
-
-
-# -- dependencies ----------------------------------------------------------------------------
-def gateway(request: Request) -> Gateway:
-    return request.app.state.gateway
-
-
-GatewayDep = Annotated[Gateway, Depends(gateway)]
-
-
-def csrf_guard(request: Request) -> None:
-    if request.method not in SAFE_METHODS and request.headers.get(CSRF_HEADER) != CSRF_VALUE:
-        raise HTTPException(403, f"missing {CSRF_HEADER}: {CSRF_VALUE} header")
-
-
-def current_user(request: Request, gw: GatewayDep) -> Identity:
-    identity = gw.identity(request)
-    if identity is None:
-        raise HTTPException(401, "sign in to PwnDoc first")
-    return identity
-
-
-UserDep = Annotated[Identity, Depends(current_user)]
-
-
-def admin_user(identity: UserDep) -> Identity:
-    if not identity.is_admin:
-        raise HTTPException(403, "administrator role required")
-    return identity
-
-
-AdminDep = Annotated[Identity, Depends(admin_user)]
-
-
-def pwndoc_http_error(exc: PwnDocError) -> HTTPException:
-    if exc.status in (401, 403, 404):
-        return HTTPException(exc.status, str(exc))
-    log.warning("PwnDoc call failed: %s", exc)
-    return HTTPException(502, "PwnDoc request failed; see the gateway log")
 
 
 # -- request models --------------------------------------------------------------------------
@@ -134,7 +133,13 @@ def status(request: Request, gw: GatewayDep) -> dict[str, Any]:
         "roles": list(identity.roles) if identity else [],
         "is_admin": bool(identity and identity.is_admin),
         "llm_configured": gw.store.settings.llm_configured,
-        "rag_available": importlib.util.find_spec("chromadb") is not None,
+        "llm_model": gw.store.settings.llm_model,  # not a secret; the UI marks fallback answers
+        "rag_available": rag_installed(),
+        "docx_refine": docx_installed(),  # python-docx is importable: the refine engine can load
+        "docx_import": docx_installed(),  # the importer reads with the same engine
+        "export_tab": docx_installed(),  # fonts, sections and PDF import (Export tab)
+        "pdf_import": pdf_tools_present(),  # mutool + pdftotext: the structure engine
+        "pdf2docx": pdf2docx_installed(),  # the optional AGPL-licensed engine
         "version": __version__,
     }
 
@@ -185,64 +190,40 @@ def list_models(_: AdminDep, gw: GatewayDep) -> dict[str, Any]:
         raise HTTPException(400, str(exc)) from exc
 
 
-@api.get("/rag/documents")
-def rag_documents(_: AdminDep, gw: GatewayDep) -> dict[str, Any]:
-    index = gw.rag_index()
-    return {"available": index is not None, "documents": index.list_documents() if index else []}
-
-
-@api.post("/rag/documents")
-def rag_upload(file: Annotated[UploadFile, File()], _: AdminDep, gw: GatewayDep) -> dict[str, Any]:
-    index = gw.rag_index()
-    if index is None:
-        raise HTTPException(400, "local RAG is unavailable: pip install 'pwndoc-ai[rag]'")
-    name = safe_filename(file.filename or "")
-    if Path(name).suffix.lower() not in SUPPORTED:
-        raise HTTPException(400, f"unsupported file type; use one of {sorted(SUPPORTED)}")
-    data = file.file.read(MAX_UPLOAD_BYTES + 1)
-    if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, "file is larger than 20 MB")
-    path = index.docs_dir / name
-    path.write_bytes(data)
-    try:
-        chunks = index.add_file(path)
-    except Exception as exc:  # noqa: BLE001 - unreadable/corrupt documents
-        path.unlink(missing_ok=True)
-        log.warning("could not index %s: %s", name, exc)
-        raise HTTPException(
-            400, f"could not index {name}: unreadable or unsupported document"
-        ) from exc
-    return {"name": name, "chunks": chunks}
-
-
-@api.delete("/rag/documents/{name}")
-def rag_delete(name: str, _: AdminDep, gw: GatewayDep) -> dict[str, Any]:
-    index = gw.rag_index()
-    if index is None:
-        raise HTTPException(400, "local RAG is unavailable")
-    index.remove(safe_filename(name))
-    return {"deleted": safe_filename(name)}
-
-
 @api.get("/audits/{audit_id}/findings")
 def audit_findings(audit_id: str, identity: UserDep, gw: GatewayDep) -> dict[str, Any]:
-    if not SAFE_ID.match(audit_id):
-        raise HTTPException(400, "invalid audit id")
+    with audit_session(gw, identity, audit_id) as (_, audit):
+        findings = audit.get("findings")
+    rows = [
+        {
+            "id": str(f.get("_id") or f.get("id")),
+            "title": f.get("title", ""),
+            "severity": _severity(f),
+        }
+        for f in (findings if isinstance(findings, list) else [])
+        if isinstance(f, dict)
+    ]
+    return {"findings": _with_order(rows, findings, gw)}
+
+
+def _with_order(rows: list[dict[str, Any]], findings: Any, gw: Gateway) -> list[dict[str, Any]]:
+    """Stored order kept; report number (``seq``) and derived severity added as new keys."""
+    from .finding_review import NormalizeUnavailable, build_plan
+    from .server_findings import normalizer_of
+
     try:
-        with gw.client(identity.cookies) as client:
-            findings = client.list_findings(audit_id)
-    except PwnDocError as exc:
-        raise pwndoc_http_error(exc) from exc
-    return {
-        "findings": [
-            {
-                "id": str(f.get("_id") or f.get("id")),
-                "title": f.get("title", ""),
-                "severity": _severity(f),
-            }
-            for f in findings
-        ]
-    }
+        plan = build_plan(findings if isinstance(findings, list) else [], normalizer_of(gw))
+    except NormalizeUnavailable:
+        return rows
+    views = {r.finding_id: r.view() for r in plan}
+    keys = ("seq", "score", "mismatch", "estimated", "vector")
+    return [
+        {**row, **{k: views[row["id"]][k] for k in keys},
+         "severity_derived": views[row["id"]]["severity"]}
+        if row["id"] in views
+        else row
+        for row in rows
+    ]  # fmt: skip
 
 
 @api.post("/jobs")
@@ -252,6 +233,7 @@ def start_job(body: JobRequest, identity: UserDep, gw: GatewayDep) -> dict[str, 
         raise HTTPException(400, f"unknown fields: {', '.join(sorted(unknown))}")
     from .refiner import RefineOptions
 
+    authorise_audit(gw, identity, body.audit_id)  # PwnDoc decides before any slot is taken
     options = (
         RefineOptions(fields=tuple(body.fields), mode=body.mode)
         if body.fields
@@ -271,6 +253,88 @@ def start_job(body: JobRequest, identity: UserDep, gw: GatewayDep) -> dict[str, 
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"job_id": job.id}
+
+
+@api.post("/audits/{audit_id}/finish")
+def finish_report(audit_id: str, identity: UserDep, gw: GatewayDep) -> dict[str, str]:
+    """Rewrite every finding of the audit with the AI, save them, then check the report builds."""
+    authorise_audit(gw, identity, audit_id)  # PwnDoc decides before any slot is taken
+    if not gw.store.settings.llm_configured:
+        raise HTTPException(400, NO_LLM)
+    from .refiner import RefineOptions
+
+    def current_session() -> dict[str, str]:
+        return gw.session_cookies(identity.username) or identity.cookies
+
+    try:
+        job = gw.jobs.start(
+            identity.username,
+            current_session,
+            audit_id,
+            None,
+            RefineOptions(mode="improve"),
+            auto_apply=True,
+            export_report=True,
+        )
+    except JobConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"job_id": job.id}
+
+
+@api.get("/audits/{audit_id}/report", dependencies=[CostlyGet])
+def audit_report(
+    audit_id: str,
+    identity: UserDep,
+    gw: GatewayDep,
+    fmt: Annotated[Literal["docx", "pdf"], Query(alias="format")] = "docx",
+    tidy: str = "1",
+) -> Response:
+    """The audit's report as Word or PDF, built on demand from PwnDoc (nothing is stored).
+
+    A GET, but it costs a PwnDoc build and maybe a LibreOffice run: like the POST routes it must
+    come from our own script, so a page on another site cannot trigger it with the user's cookie.
+    The layout is tidied on the way out (``tidy=0`` opts out): blank pages, orphan headings and
+    runs of empty paragraphs are fixed, a PDF is rendered with metric-compatible fonts.
+    """
+    tidy_on = parse_tidy(tidy)
+    with audit_session(gw, identity, audit_id) as (client, audit):
+        blocker = export_blocker(audit)
+        if blocker:
+            raise HTTPException(409, blocker)
+        verified = download_headers(*download_normalise(gw, client, audit_id, audit))
+        data = client.export_docx(audit_id)
+    if not is_docx(data):
+        raise HTTPException(502, "PwnDoc did not return a Word file")
+    # the admin's default fonts first: tidy measures and the renderer draws the final fonts
+    data, typography = apply_defaults(data, gw.store.settings)
+    with layout_limited(gw, identity.username):
+        if fmt == "pdf":
+            outcome = _to_pdf(data, audit_id, tidy_on)
+            body, layout = outcome.data, layout_headers(outcome.fix_count, outcome)
+        else:
+            tidied = tidy_for_download(data, enabled=tidy_on)
+            body, layout = tidied.data, layout_headers(tidied.fix_count)
+    extension, media_type = FORMATS[fmt]
+    stem = report_stem(audit.get("name"))
+    headers = {
+        "Content-Disposition": content_disposition(stem, extension),
+        **typography,
+        **layout,
+        **verified,
+    }
+    return Response(body, media_type=media_type, headers=headers)
+
+
+def _to_pdf(docx: bytes, audit_id: str, tidy: bool) -> PdfOutcome:
+    try:
+        return render_pdf(docx, tidy=tidy)
+    except PdfUnavailable as exc:
+        raise HTTPException(501, str(exc)) from exc
+    except PdfBusy as exc:
+        raise HTTPException(503, str(exc), headers={"Retry-After": "10"}) from exc
+    except PdfError as exc:
+        log.warning("PDF conversion failed for audit %s: %s", audit_id, exc)
+        raise HTTPException(502, "PDF conversion failed; see the gateway log") from exc
 
 
 def _owned_job(job_id: str, identity: Identity, gw: Gateway) -> Any:
@@ -299,6 +363,8 @@ def job_apply(job_id: str, body: ApplyRequest, identity: UserDep, gw: GatewayDep
         gw.jobs.apply(job, identity.cookies, body.finding_ids)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    except SessionExpiredError as exc:  # a fixed text; the user must sign in again
+        raise HTTPException(401, str(exc)) from exc
     except JobError as exc:
         log.warning("apply failed for job %s: %s", job_id, exc)
         raise HTTPException(500, "applying the changes failed; see the gateway log") from exc
@@ -306,6 +372,33 @@ def job_apply(job_id: str, body: ApplyRequest, identity: UserDep, gw: GatewayDep
 
 
 # -- app factory -----------------------------------------------------------------------------
+def _static_path(name: str) -> Path | None:
+    """The asset file for a plain ``name.js`` / ``name.css`` that really lives in the static dir."""
+    if not STATIC_NAME.fullmatch(name):
+        return None
+    root = STATIC_DIR.resolve()
+    path = (STATIC_DIR / name).resolve()  # follows symlinks: one pointing outside is refused
+    return path if path.is_file() and path.parent == root else None
+
+
+def _lifespan(gw: Gateway) -> Callable[[FastAPI], AbstractAsyncContextManager[None]]:
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        gw.start_embedder_cleanup()  # a killed gateway left its Ollama running: stop it now
+        yield
+        try:
+            await gw.pool.aclose()
+        finally:
+            try:
+                gw.close_docx()  # running refinements are told to stop and record it
+                gw.close_docx_import()  # running import steps too (a create rolls back)
+                gw.close_export()  # running Export analyses too
+            finally:
+                gw.close_rag()  # the embedder must stop even if closing the pool failed
+
+    return lifespan
+
+
 def create_app(
     data_dir: str | os.PathLike[str] | None = None,
     transport: Any | None = None,
@@ -314,17 +407,17 @@ def create_app(
 ) -> FastAPI:
     """Build the gateway. ``transport`` replaces the network for upstream calls (tests)."""
     gw = Gateway(ConfigStore(data_dir, env=env), transport, refiner_factory)
-
-    @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        yield
-        await gw.pool.aclose()
-
-    app = FastAPI(title="pwndoc-ai gateway", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app = FastAPI(title="pwndoc-ai gateway", lifespan=_lifespan(gw), docs_url=None, redoc_url=None)
     app.state.gateway = gw
     app.add_middleware(ApiHeadersMiddleware)
-    app.add_middleware(BodyLimitMiddleware)  # outermost of ours: reject before any parsing
+    app.add_middleware(ExportBodyLimit)  # outermost of ours: reject before any parsing
     app.include_router(api)
+    app.include_router(features_router)
+    app.include_router(findings_router)
+    app.include_router(rag_router)
+    app.include_router(export_router)  # before the docx routes: a narrower prefix
+    app.include_router(docx_router)
+    app.include_router(import_router)
 
     @app.exception_handler(UpstreamError)
     async def upstream_down(_: Request, exc: UpstreamError) -> JSONResponse:
@@ -332,10 +425,10 @@ def create_app(
 
     @app.get("/__ai/static/{name}")
     def static_asset(name: str) -> FileResponse:
-        media_type = STATIC_TYPES.get(name)
-        path = STATIC_DIR / name
-        if media_type is None or not path.is_file():
+        path = _static_path(name)
+        if path is None:
             raise HTTPException(404, "not found")
+        media_type = STATIC_TYPES[path.suffix.lstrip(".")]
         return FileResponse(path, media_type=media_type, headers={"Cache-Control": "no-store"})
 
     @app.websocket("/socket.io/{rest:path}")

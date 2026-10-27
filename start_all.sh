@@ -17,6 +17,8 @@
 #   GATEWAY_MODE            https | http              (default: https, self-signed certificate)
 #   PWNDOC_PUBLIC           1 = also expose PwnDoc itself on the LAN (default: 0, localhost only)
 #   WITH_RAG                1 = install the local-document RAG extra (large download)
+#   WITH_PDFIMPORT          1 = install the optional pdf2docx PDF engine (PyMuPDF is AGPL-3.0)
+#   (fonts for Word/PDF output: run 'sudo scripts/install_fonts.sh --yes' once, see docs/FONTS.md)
 #   PWNDOC_REF              upstream PwnDoc tag/branch (default: v1.7.0)
 #   LLM_API_KEY, LLM_BASE_URL, LLM_MODEL   preset the LLM instead of using AI Settings
 set -euo pipefail
@@ -229,6 +231,7 @@ ensure_gateway_install() {
   [ -d "$VENV" ] || { info "Creating Python virtual environment ..."; python3 -m venv "$VENV"; }
   local extras="https" probe="import cryptography"
   if [ "$WITH_RAG" = 1 ]; then extras="rag,https"; probe="import cryptography, chromadb"; fi
+  if [ "${WITH_PDFIMPORT:-0}" = 1 ]; then extras="$extras,pdfimport"; probe="$probe, pdf2docx, fitz"; fi
   if [ ! -x "$VENV/bin/pwndoc-ai" ] || ! "$VENV/bin/python" -c "$probe" 2>/dev/null; then
     info "Installing the gateway (extras: $extras) ..."
     "$VENV/bin/pip" install -q --disable-pip-version-check -e "${ROOT}[${extras}]"
