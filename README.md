@@ -46,7 +46,19 @@ No PwnDoc credentials are stored.
 git clone https://github.com/Mahesh-nrg/Report_auto.git
 cd Report_auto
 
-# 2. (Recommended) pick your own admin password, then start everything
+# 2. Interactive installer: asks for admin creds, LLM base URL/key/model, embeddings backend,
+#    then installs and starts the full stack (PwnDoc in Docker + the AI gateway).
+./install.sh
+```
+
+`install.sh` writes your answers to `.env` (mode 0600) and then runs `./start_all.sh` for you.
+Re-run it any time — it is idempotent and keeps an existing `.env` unless you pass
+`--reconfigure`. Every question can be preset as an environment variable instead (for scripted
+installs): `LLM_BASE_URL=... LLM_API_KEY=... LLM_MODEL=... PWNDOC_AI_EMBEDDER=... ./install.sh --yes`.
+
+Prefer to do it by hand instead (no prompts)? Skip straight to `./start_all.sh` below:
+
+```bash
 export PWNDOC_ADMIN_PASSWORD='Str0ng-Passw0rd'     # skip to use the default Admin@12345
 ./start_all.sh
 ```
