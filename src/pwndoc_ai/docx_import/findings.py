@@ -29,7 +29,7 @@ from .labels import (
     label_key,
     severity_of_text,
 )
-from .reader_xml import Counter, ImageRef, cell_items, cell_text, rows, w, wattr
+from .reader_xml import T_TBL, Counter, ImageRef, blocks, cell_items, cell_text, rows, w, wattr
 
 SPLIT_URLS = re.compile(r"\n|\t| {2,}")
 SUMMARY_LABELS = re.compile(r"(?im)^\s*(urls?|parameters?|location|path)\s*:\s*")
@@ -229,16 +229,22 @@ def split_figures(items: list) -> tuple[list[Para], list[Figure]]:
 
 def row_label(cells: list) -> tuple[str, object]:
     """(field, value cell) of one detail-table row; ``("poc", cell)`` for the single-cell PoC
-    row; ``("", None)`` for an unknown row. The most specific (rightmost) label wins."""
+    row; ``("group", cell)`` for the "Vulnerable Point / Error Location" row (whose value is a
+    nested sub-table, read by ``_group_values``); ``("", None)`` for an unknown row. The most
+    specific (rightmost, non-group) label wins."""
     if len(cells) == 1:
         first = next((line for line in cell_text(cells[0]).split("\n") if line.strip()), "")
         key = label_key(POC_LABEL.match(first).group(0)) if POC_LABEL.match(first) else ""
         return ("poc", cells[0]) if key in POC_INLINE_LABELS else ("", None)
+    saw_group = False
     for cell in reversed(cells[:-1]):
         field = field_of(" ".join(cell_text(cell).split("\n")))
-        if field and field != "group":
+        if field == "group":
+            saw_group = True
+            continue
+        if field:
             return field, cells[-1]
-    return "", None
+    return ("group", cells[-1]) if saw_group else ("", None)
 
 
 def is_detail_table(grid: list[list]) -> bool:
@@ -275,12 +281,46 @@ def _detail_cells(grid: list[list], numbering: dict, counter: Counter) -> tuple[
         if value is None:
             _continue_cell(cells, row, numbering, counter)
             continue
+        if field == "group":
+            cells.extend(_group_cells(value, numbering, counter))
+            continue
         items = number_lists(cell_items(value, numbering, counter))
         text = "\n".join(i.text for i in items if isinstance(i, Para))
         if field == "severity" and not severity_of_text(text):
             text = severity_fill(value) or text
         cells.append(_Cell(field, text, tuple(items)))
     return cells, first_id
+
+
+GROUP_SUB_FIELDS = frozenset({"location", "urls", "parameter"})
+
+
+def _group_cells(tc, numbering: dict, counter: Counter) -> list[_Cell]:
+    """"Vulnerable Point / Error Location" row: a nested sub-table with one label/value row per
+    location/urls/parameter field (the brandarmy-style layout). Falls back to reading the cell's
+    own text by label when there is no nested table (an older flat layout)."""
+    found: list[_Cell] = []
+    seen: set[str] = set()
+    for block in blocks(tc):
+        if block.tag != T_TBL:
+            continue
+        for row in rows(block):
+            if len(row) != 2:  # noqa: PLR2004 - a label/value sub-row
+                continue
+            field = field_of(" ".join(cell_text(row[0]).split("\n")))
+            if field not in GROUP_SUB_FIELDS or field in seen:
+                continue
+            seen.add(field)
+            items = number_lists(cell_items(row[1], numbering, counter))
+            text = "\n".join(i.text for i in items if isinstance(i, Para))
+            found.append(_Cell(field, text, tuple(items)))
+    if found:
+        return found
+    # No nested table: the label's own text may still carry the location/URL/parameter lines
+    # (an older export, or a user who typed the group's value directly).
+    items = number_lists(cell_items(tc, numbering, counter))
+    text = "\n".join(i.text for i in items if isinstance(i, Para))
+    return [_Cell("location", text, tuple(items))] if not is_blank(text) else []
 
 
 def _continue_cell(cells: list[_Cell], row: list, numbering: dict, counter: Counter) -> None:

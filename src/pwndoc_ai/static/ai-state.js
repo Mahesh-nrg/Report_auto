@@ -49,6 +49,19 @@ const initialState = () => ({
 
 export const S = Object.assign({ route: { kind: 'other' } }, initialState());
 
+// Dock collapsed/expanded: not part of initialState() (a reset on logout must not re-expand a
+// user's collapsed bar), persisted so it survives a reload.
+const DOCK_COLLAPSED_KEY = 'pwndocAiDockCollapsed';
+function loadDockCollapsed() {
+  try { return localStorage.getItem(DOCK_COLLAPSED_KEY) === '1'; } catch (e) { return false; }
+}
+S.dockCollapsed = loadDockCollapsed();
+export function setDockCollapsed(collapsed) {
+  S.dockCollapsed = collapsed;
+  try { localStorage.setItem(DOCK_COLLAPSED_KEY, collapsed ? '1' : '0'); } catch (e) { /* storage unavailable */ }
+  ui.renderDock();
+}
+
 /** Timers of the two polling loops, kept outside S so a reset can always cancel them. */
 export const timers = { poll: null, fin: null, docx: null, export: null, exportSave: null };
 

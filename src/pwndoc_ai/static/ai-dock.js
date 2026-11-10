@@ -3,7 +3,7 @@ import { api } from './ai-api.js';
 import { h, icon } from './ai-dom.js';
 import { syncImportUser } from './ai-import-state.js';
 import { dockMount } from './ai-shell.js';
-import { S, isAdmin, ui } from './ai-state.js';
+import { S, isAdmin, setDockCollapsed, ui } from './ai-state.js';
 import { countFinished, isTerminal } from './ai-util.js';
 
 const STATUS_RETRY_MS = 5000;
@@ -42,6 +42,15 @@ function settingsButton(wide) {
   }, icon('sliders'), wide ? h('span', { class: 'ai-dock-label' }, 'AI Settings') : null);
 }
 
+function collapseToggle(collapsed) {
+  return h('button', {
+    type: 'button', class: 'ai-dock-toggle', 'data-fk': 'dock-toggle',
+    onclick: () => setDockCollapsed(!collapsed),
+    'aria-label': collapsed ? 'Expand AI assistant bar' : 'Collapse AI assistant bar',
+    title: collapsed ? 'Expand' : 'Collapse',
+  }, icon(collapsed ? 'chevLeft' : 'chevRight'));
+}
+
 export function renderDock() {
   const st = S.status;
   const r = S.route;
@@ -53,7 +62,16 @@ export function renderDock() {
   if (st.docx_import) kids.push(auditButton(IMPORT_BUTTON));
   if (st.export_tab !== undefined) kids.push(auditButton(EXPORT_BUTTON));  // false: the drawer says how to install it
   if (isAdmin()) kids.push(settingsButton(!!r.settings));
-  dockMount.replaceChildren(kids.length ? h('div', { class: 'ai-dock', role: 'group', 'aria-label': 'AI assistant' }, kids) : null);
+  if (!kids.length) { dockMount.replaceChildren(); return; }
+  const collapsed = !!S.dockCollapsed;
+  if (collapsed) {
+    dockMount.replaceChildren(
+      h('div', { class: 'ai-dock ai-dock-collapsed', role: 'group', 'aria-label': 'AI assistant (collapsed)' },
+        collapseToggle(true)));
+    return;
+  }
+  kids.push(collapseToggle(false));
+  dockMount.replaceChildren(h('div', { class: 'ai-dock', role: 'group', 'aria-label': 'AI assistant' }, kids));
 }
 
 /**

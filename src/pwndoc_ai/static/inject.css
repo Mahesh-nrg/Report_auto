@@ -51,6 +51,16 @@ button, input, textarea, select { font: inherit; color: inherit; }
   .ai-dock .ai-dock-main { padding: 0 11px; }
 }
 
+/* ---- dock: collapse to a small edge tab ---- */
+.ai-dock { transition: transform .22s var(--ease), opacity .22s var(--ease); }
+.ai-dock-toggle {
+  width: 28px; padding: 0 !important; justify-content: center;
+}
+.ai-dock-collapsed {
+  padding: 0; border-radius: 10px 0 0 10px; inset-inline-end: 0; gap: 0;
+}
+.ai-dock-collapsed .ai-dock-toggle { width: 32px; height: 40px; border-radius: 10px 0 0 10px; }
+
 /* ---- drawer ---- */
 .ai-backdrop { position: fixed; inset: 0; pointer-events: auto; background: rgba(8, 14, 30, .5); opacity: 0; transition: opacity .25s; }
 .ai-backdrop.ai-open { opacity: 1; }

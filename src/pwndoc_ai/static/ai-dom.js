@@ -45,6 +45,8 @@ const ICONS = {
   download: ['M12 4v11', 'M7.5 10.5L12 15l4.5-4.5', 'M5 19h14'],
   type: ['M5 7V5h14v2', 'M12 5v14', 'M9 19h6'],
   history: ['M4 12a8 8 0 1 0 2.6-5.9', 'M4 4v4.5h4.5', 'M12 8v4.2l3 1.8'],
+  chevLeft: ['M15 6l-6 6 6 6'],
+  chevRight: ['M9 6l6 6-6 6'],
 };
 
 export function icon(name) {
